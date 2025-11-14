@@ -10,7 +10,10 @@ Focus:
 - Create modeling-ready core dataset for:
   * Price prediction using brand and model year
   * Price vs odometer + condition
-  * Brand/model-year/state volume patterns
+- Create separate aggregated datasets for:
+  * Counts by model year
+  * Counts by make + model year
+  * Counts by make + model year + state
 """
 
 import argparse
@@ -18,6 +21,7 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
+import os
 
 
 # -----------------------------
@@ -267,7 +271,7 @@ def clean_vehicle_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
     if "state" in df.columns:
         df["state_clean"] = _standardize_state(df["state"])
 
-    # --- 3.2 Parse sale date and create time features (context only) ---
+    # --- 3.2 Parse sale date and create time features (for context only) ---
     if "saledate" in df.columns:
         df["saledate_parsed"] = pd.to_datetime(
             df["saledate"],
@@ -290,10 +294,9 @@ def clean_vehicle_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
     else:
         df["year"] = np.nan
 
-    # NOTE: we no longer filter by sale_year window for modeling,
-    # since all sales are in 2014–2015 and we focus on model year.
+    # We no longer filter by sale_year window (all are 2014–2015 anyway)
 
-    # Vehicle age at sale: sale_year - manufacture year (still useful as a feature)
+    # Vehicle age at sale: sale_year - manufacture year
     if "sale_year" in df.columns:
         df["vehicle_age_at_sale"] = df["sale_year"] - df["year"]
     else:
@@ -346,31 +349,7 @@ def clean_vehicle_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
         after = df.shape[0]
         print(f"Dropped {before - after} duplicate (vin, saledate) rows.")
 
-    # --- 3.7 Precompute model-year volume features (for RQ3) ---
-    # Use cleaned df, but don't require odometer/condition/etc for counts
-    vol_base = df[["make", "year", "state_clean"]].dropna(
-        subset=["make", "year", "state_clean"]
-    )
-
-    model_year_counts = (
-        vol_base.groupby("year")
-        .size()
-        .rename("total_sold_by_model_year")
-    )
-
-    make_year_counts = (
-        vol_base.groupby(["make", "year"])
-        .size()
-        .rename("total_sold_by_make_model_year")
-    )
-
-    make_year_state_counts = (
-        vol_base.groupby(["make", "year", "state_clean"])
-        .size()
-        .rename("total_sold_by_make_model_year_state")
-    )
-
-    # --- 3.8 Build core modeling dataset ---
+    # --- 3.7 Build core modeling dataset (row-level features only) ---
     core_cols = [
         "make",
         "year",
@@ -389,51 +368,16 @@ def clean_vehicle_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
         "mmr_clean",
         "sellingprice_clean",
         "log_sellingprice",
-        # volume features
-        "total_sold_by_model_year",
-        "total_sold_by_make_model_year",
-        "total_sold_by_make_model_year_state",
     ]
 
-    # Ensure all core columns exist in df
+    # Ensure all core columns exist
     for c in core_cols:
         if c not in df.columns:
             df[c] = np.nan
 
     df_model_core = df[core_cols].copy()
 
-    # Merge volume features from groupby results
-    df_model_core = df_model_core.merge(
-        model_year_counts, on="year", how="left", suffixes=("", "_from_year_counts")
-    )
-    df_model_core["total_sold_by_model_year"] = df_model_core[
-        "total_sold_by_model_year_from_year_counts"
-    ].fillna(df_model_core["total_sold_by_model_year"])
-    df_model_core.drop(columns=["total_sold_by_model_year_from_year_counts"], inplace=True)
-
-    df_model_core = df_model_core.merge(
-        make_year_counts, on=["make", "year"], how="left", suffixes=("", "_from_make_year")
-    )
-    df_model_core["total_sold_by_make_model_year"] = df_model_core[
-        "total_sold_by_make_model_year_from_make_year"
-    ].fillna(df_model_core["total_sold_by_make_model_year"])
-    df_model_core.drop(columns=["total_sold_by_make_model_year_from_make_year"], inplace=True)
-
-    df_model_core = df_model_core.merge(
-        make_year_state_counts,
-        on=["make", "year", "state_clean"],
-        how="left",
-        suffixes=("", "_from_make_year_state"),
-    )
-    df_model_core["total_sold_by_make_model_year_state"] = df_model_core[
-        "total_sold_by_make_model_year_state_from_make_year_state"
-    ].fillna(df_model_core["total_sold_by_make_model_year_state"])
-    df_model_core.drop(
-        columns=["total_sold_by_make_model_year_state_from_make_year_state"],
-        inplace=True,
-    )
-
-    # --- 3.9 Drop rows missing any absolutely essential fields for your analyses ---
+    # Drop rows missing any absolutely essential fields for your analyses
     # Focus on model year, brand, state, price, odometer, condition, color.
     essential = [
         "make",
@@ -457,7 +401,56 @@ def clean_vehicle_data(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
 
 
 # -----------------------------
-# 4. CLI entry point (CSV version)
+# 4. Aggregated volume datasets for RQ3
+# -----------------------------
+
+def build_volume_datasets(df_clean: pd.DataFrame, output_dir: str = "data/cleaned") -> None:
+    """
+    Build separate datasets with counts by:
+    - model year
+    - make + model year
+    - make + model year + state
+
+    These are for RQ3: understanding which brands sell most per volume
+    by model year and state.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    base = df_clean[["make", "year", "state_clean"]].dropna(subset=["make", "year", "state_clean"])
+
+    # 1) total vehicles sold by model year
+    model_year_vol = (
+        base.groupby("year")
+        .size()
+        .reset_index(name="total_sold_by_model_year")
+    )
+    model_year_path = os.path.join(output_dir, "model_year_volume.csv")
+    model_year_vol.to_csv(model_year_path, index=False)
+    print(f"Saved model-year volume dataset to: {model_year_path}")
+
+    # 2) total vehicles sold by make × model year
+    make_year_vol = (
+        base.groupby(["make", "year"])
+        .size()
+        .reset_index(name="total_sold_by_make_model_year")
+    )
+    make_year_path = os.path.join(output_dir, "make_model_year_volume.csv")
+    make_year_vol.to_csv(make_year_path, index=False)
+    print(f"Saved make-model-year volume dataset to: {make_year_path}")
+
+    # 3) total vehicles sold by make × model year × state
+    make_year_state_vol = (
+        base.groupby(["make", "year", "state_clean"])
+        .size()
+        .reset_index(name="total_sold_by_make_model_year_state")
+    )
+    make_year_state_path = os.path.join(output_dir, "make_model_year_state_volume.csv")
+    make_year_state_vol.to_csv(make_year_state_path, index=False)
+    print(f"Saved make-model-year-state volume dataset to: {make_year_state_path}")
+
+
+# -----------------------------
+# 5. CLI entry point (CSV version)
 # -----------------------------
 
 def main():
@@ -489,17 +482,20 @@ def main():
     df_clean, df_model_core = clean_vehicle_data(df_raw)
 
     # Make sure the output directories exist
-    import os
     os.makedirs(os.path.dirname(args.output_clean), exist_ok=True)
     os.makedirs(os.path.dirname(args.output_core), exist_ok=True)
 
-    # SAVE AS CSV
+    # SAVE CLEANED ROW-LEVEL DATASETS
     df_clean.to_csv(args.output_clean, index=False)
     df_model_core.to_csv(args.output_core, index=False)
 
     print(f"\nSaved cleaned full dataset to: {args.output_clean}")
     print(f"Saved modeling core dataset to: {args.output_core}")
 
+    # Build and save aggregated volume datasets for RQ3
+    build_volume_datasets(df_clean, output_dir=os.path.dirname(args.output_clean))
+
 
 if __name__ == "__main__":
     main()
+
