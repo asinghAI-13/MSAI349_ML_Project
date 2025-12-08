@@ -1,7 +1,5 @@
-# =============================================
 # RQ2 MODELING — Predict Volume Using
 # Make + Model Year + State
-# =============================================
 
 # 1. IMPORTS
 import pandas as pd

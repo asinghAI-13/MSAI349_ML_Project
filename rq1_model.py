@@ -1,7 +1,6 @@
-# =============================================
 # RQ1 MODELING — Predict Selling Price Using
 # Model Year + Brand + Condition + Odometer + Other Features
-# =============================================
+
 
 # 1. IMPORTS
 import pandas as pd
