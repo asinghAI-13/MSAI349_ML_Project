@@ -71,7 +71,7 @@ preprocessor = ColumnTransformer(
 dt_model = Pipeline(steps=[
     ("prep", preprocessor),
     ("model", DecisionTreeRegressor(
-        max_depth=12,
+        max_depth=10,
         random_state=42
     ))
 ])
